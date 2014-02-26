@@ -27,8 +27,6 @@ def log_before_and_after(msg):
     logger.info('(complete) ' + msg)
 
 
-
-
 class Processor(object):
     """Base class"""
 
@@ -44,6 +42,14 @@ class Processor(object):
     @staticmethod
     def processor(localpath):
         raise NotImplemented
+
+    def retrieve_and_process_files(cls):
+        """
+        Looks for remote files, put them on s3, processes them.
+        """
+        cls.enqueue_files_for_s3_uploading()
+        cls.put_files_on_s3()
+        cls.process_queued_files()
 
 
 class SFTP_S3_CSV_Processor(Processor):
@@ -63,15 +69,6 @@ class SFTP_S3_CSV_Processor(Processor):
     """
 
     __metaclass__ = abc.ABCMeta
-
-    @classmethod
-    def retrieve_and_process_files(cls):
-        """
-        Looks for csvs on sftp, processes them, saves into sql table.
-        """
-        cls.enqueue_files_for_s3_uploading()
-        cls.put_files_on_s3()
-        cls.process_queued_files()
 
     @classmethod
     def enqueue_files_for_s3_uploading(cls):
@@ -217,23 +214,14 @@ class IMAP_S3_CSV_Processor(Processor):
     __metaclass__ = abc.ABCMeta
 
     @classmethod
-    def retrieve_and_process_files(cls):
-        """
-        Looks for attachments on imap, processes them, saves into sql table.
-        """
-        cls.enqueue_emails_for_s3_uploading()
-        cls.put_attachments_on_s3()
-        cls.process_queued_files()
-
-    @classmethod
-    def enqueue_emails_for_s3_uploading(cls):
+    def enqueue_files_for_s3_uploading(cls):
         enqueue_imap_emails(queue_name=cls.S3_UPLOAD_QUEUE,
                             imap_account=cls.IMAP_ACCOUNT,
                             mailbox=cls.IMAP_MBOX,
                             file_regex=cls.IMAP_FILE_REGEX)
 
     @classmethod
-    def put_attachments_on_s3(cls):
+    def put_files_on_s3(cls):
         if cls.ENCRYPT_FILE:
             gpg_recipient = cls.ENCRYPT_RECIPIENT
         else:
