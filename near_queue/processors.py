@@ -43,6 +43,7 @@ class Processor(object):
     def processor(localpath):
         raise NotImplemented
 
+    @classmethod
     def retrieve_and_process_files(cls):
         """
         Looks for remote files, put them on s3, processes them.
