@@ -94,22 +94,15 @@ class SFTP_S3_CSV_Processor(Processor):
 
 
 def enqueue_sftp_files(queue_name, sftp_account, sftp_folder, file_regex):
-    q, _ = Queue.objects.get_or_create(name=queue_name)
     sftp = rowdy.sftp.SFTPConnection(sftp_account.username,
                                      sftp_account.password,
                                      sftp_account.hostname)
     sftp.open_connection()
     files = sftp.listdir(sftp_folder)
     files = [os.path.join(sftp_folder, f) for f in files]
-    files = [f for f in files if re.match(file_regex, f)]
-    for f in files:
-        qe, created = QueueEntry.objects.get_or_create(queue=q,
-                                                       key=f)
-        if created:
-            logger.info('sftp file queued: {0}'.format(qe))
-        else:
-            logger.info('already in queue: {0}'.format(qe))
+    keys = [f for f in files if re.match(file_regex, f)]
     sftp.close_connection()
+    _add_keys_to_upload_queue(keys, queue_name)
 
 
 def send_sftp_files_into_s3(sftp_queue, s3_queue, sftp_account, s3_account,
@@ -239,21 +232,28 @@ class IMAP_S3_CSV_Processor(Processor):
 
 def enqueue_imap_emails(queue_name, imap_account, mailbox, file_regex):
     """Queue each email in mailbox for their attachments to be uploaded"""
-    q, _ = Queue.objects.get_or_create(name=queue_name)
     imap_account.open_connection()
     uid_validity = imap_account.uid_validity(mailbox)
     uids = imap_account.list_uids(mailbox)
+    imap_account.close_connection()
+    keys = []
     for uid in uids:
         imap_relative_url = '{0};UID={1}/;UIDVALIDITY={2}'.format(mailbox,
                                                                   uid,
                                                                   uid_validity)
+        keys.append(imap_relative_url)
+    _add_keys_to_upload_queue(keys, queue_name)
+
+
+def _add_keys_to_upload_queue(keys, queue_name):
+    q, _ = Queue.objects.get_or_create(name=queue_name)
+    for key in keys:
         qe, created = QueueEntry.objects.get_or_create(queue=q,
-                                                       key=imap_relative_url)
+                                                       key=key)
         if created:
-            logger.info('imap email queued: {0}'.format(qe))
+            logger.info('queued: {0}'.format(qe))
         else:
             logger.info('already in queue: {0}'.format(qe))
-    imap_account.close_connection()
 
 
 def send_imap_attachments_into_s3(imap_queue, s3_queue, imap_account,
