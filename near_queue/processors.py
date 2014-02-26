@@ -52,6 +52,51 @@ class Processor(object):
         cls.process_queued_files()
 
 
+def _add_keys_to_upload_queue(keys, queue_name):
+    q, _ = Queue.objects.get_or_create(name=queue_name)
+    for key in keys:
+        qe, created = QueueEntry.objects.get_or_create(queue=q,
+                                                       key=key)
+        if created:
+            logger.info('queued: {0}'.format(qe))
+        else:
+            logger.info('already in queue: {0}'.format(qe))
+
+
+def _add_keys_to_process_queue(keys, queue_name):
+    process_q, _ = Queue.objects.get_or_create(name=queue_name)
+    for key in keys:
+        qe, _ = QueueEntry.objects.get_or_create(queue=process_q,
+                                                 key=key,
+                                                 sort_key=key)
+        qe.is_complete = False
+        qe.save()
+
+
+def _put_on_s3(localpath, s3_key, s3_account, compress, gpg_recipient):
+    """
+    put file on s3, optionally gzip, optionally gpg encrypt.
+    """
+    conn = S3Connection(aws_access_key_id=s3_account.access_key,
+                        aws_secret_access_key=s3_account.secret_key,
+                        host=s3_account.host)
+    bucket = conn.get_bucket(s3_account.bucket)
+    tempfile = localpath
+    if compress:
+        s3_key += '.gz'
+        tempfile = gzip_file(tempfile)
+    if gpg_recipient is not None:
+        s3_key += '.gpg'
+        tempfile = gpg_encrypt(tempfile, gpg_recipient)
+    k = Key(bucket, name=s3_key)
+    k.set_contents_from_filename(tempfile)
+    if compress:
+        os.remove(localpath + '.gz')
+    if gpg_recipient is not None:
+        os.remove(localpath + '.gpg')
+    return s3_key
+
+
 class SFTP_S3_CSV_Processor(Processor):
     """
     Put files from sftp onto s3, and process them.
@@ -110,19 +155,14 @@ def send_sftp_files_into_s3(sftp_queue, s3_queue, sftp_account, s3_account,
                             compress=True, gpg_recipient=None):
     upload_q, _ = Queue.objects.get_or_create(name=sftp_queue)
     entries = QueueEntry.objects.filter(queue=upload_q, is_complete=False)
-    process_q, _ = Queue.objects.get_or_create(name=s3_queue)
     for entry in entries:
         with log_before_and_after('handling: {0}'.format(entry)):
-            s3_key = _put_sftp_file_on_s3(entry.key, s3_account, s3_directory,
-                                          sftp_account,
-                                          remove_from_sftp=remove_from_sftp,
-                                          compress=compress,
-                                          gpg_recipient=gpg_recipient)
-            qe, _ = QueueEntry.objects.get_or_create(queue=process_q,
-                                                     key=s3_key,
-                                                     sort_key=s3_key)
-            qe.is_complete = False
-            qe.save()
+            s3_keys = _put_sftp_file_on_s3(entry.key, s3_account, s3_directory,
+                                           sftp_account,
+                                           remove_from_sftp=remove_from_sftp,
+                                           compress=compress,
+                                           gpg_recipient=gpg_recipient)
+            _add_keys_to_process_queue(s3_keys, s3_queue)
             entry.mark_as_complete()
 
 
@@ -138,27 +178,23 @@ def _put_sftp_file_on_s3(fname, s3_account, s3_directory, sftp_account,
     sftp.close_connection()
 
     s3_key = os.path.join(s3_directory, os.path.basename(fname))
-    if compress:
-        s3_key += '.gz'
-        tempfile = gzip_file(tempfile, delete_original=True)
-    if gpg_recipient is not None:
-        s3_key += '.gpg'
-        tempfile = gpg_encrypt(tempfile, gpg_recipient, delete_original=True)
+    keys = {
+        tempfile: s3_key,
+    }
 
-    conn = S3Connection(aws_access_key_id=s3_account.access_key,
-                        aws_secret_access_key=s3_account.secret_key,
-                        host=s3_account.host)
-    bucket = conn.get_bucket(s3_account.bucket)
-    k = Key(bucket, name=s3_key)
-    k.set_contents_from_filename(tempfile)
-    os.remove(tempfile)
+    s3_keys = []
+    for localpath, s3_key in keys.iteritems():
+        s3_location = _put_on_s3(localpath, s3_key, s3_account, compress,
+                                 gpg_recipient)
+        os.remove(localpath)
+        s3_keys.append(s3_location)
 
     if remove_from_sftp:
         sftp.open_connection()
         sftp.remove(fname)
         sftp.close_connection()
 
-    return s3_key
+    return s3_keys
 
 
 def process_s3_files(queue_name, s3_account, processor_fn, decrypt):
@@ -170,15 +206,17 @@ def process_s3_files(queue_name, s3_account, processor_fn, decrypt):
                 base = os.path.basename(entry.key)
                 _, tmp_fname = mkstemp(suffix=base)
 
+                s3_secret = s3_account.secret_key
                 conn = S3Connection(aws_access_key_id=s3_account.access_key,
-                                    aws_secret_access_key=s3_account.secret_key,
+                                    aws_secret_access_key=s3_secret,
                                     host=s3_account.host)
                 bucket = conn.get_bucket(s3_account.bucket)
 
                 k = Key(bucket, name=entry.key)
                 k.get_contents_to_filename(tmp_fname)
 
-                tmp_fname = gpg_decrypt(tmp_fname, delete_original=True)
+                if decrypt:
+                    tmp_fname = gpg_decrypt(tmp_fname, delete_original=True)
                 processor_fn(tmp_fname)
 
                 os.remove(tmp_fname)
@@ -245,17 +283,6 @@ def enqueue_imap_emails(queue_name, imap_account, mailbox, file_regex):
     _add_keys_to_upload_queue(keys, queue_name)
 
 
-def _add_keys_to_upload_queue(keys, queue_name):
-    q, _ = Queue.objects.get_or_create(name=queue_name)
-    for key in keys:
-        qe, created = QueueEntry.objects.get_or_create(queue=q,
-                                                       key=key)
-        if created:
-            logger.info('queued: {0}'.format(qe))
-        else:
-            logger.info('already in queue: {0}'.format(qe))
-
-
 def send_imap_attachments_into_s3(imap_queue, s3_queue, imap_account,
                                   file_regex,
                                   s3_account, s3_directory,
@@ -264,7 +291,6 @@ def send_imap_attachments_into_s3(imap_queue, s3_queue, imap_account,
     """For each email, upload matching attachments into s3"""
     upload_q, _ = Queue.objects.get_or_create(name=imap_queue)
     entries = QueueEntry.objects.filter(queue=upload_q, is_complete=False)
-    process_q, _ = Queue.objects.get_or_create(name=s3_queue)
     for entry in entries:
         with log_before_and_after('handling: {0}'.format(entry)):
             s3_keys = _put_imap_attachments_on_s3(entry.key, s3_account,
@@ -274,13 +300,8 @@ def send_imap_attachments_into_s3(imap_queue, s3_queue, imap_account,
                                                   imap_archive_mbox,
                                                   compress=compress,
                                                   gpg_recipient=gpg_recipient)
-            for s3_key in s3_keys:
-                qe, _ = QueueEntry.objects.get_or_create(queue=process_q,
-                                                         key=s3_key,
-                                                         sort_key=s3_key)
-                qe.is_complete = False
-                qe.save()
-                entry.mark_as_complete()
+            _add_keys_to_process_queue(s3_keys, s3_queue)
+            entry.mark_as_complete()
 
 
 def _put_imap_attachments_on_s3(imap_url, s3_account, s3_directory,
@@ -294,28 +315,20 @@ def _put_imap_attachments_on_s3(imap_url, s3_account, s3_directory,
                                                    imap_details['UIDVALIDITY'],
                                                    filename_regex=file_regex)
     imap_account.close_connection()
-    conn = S3Connection(aws_access_key_id=s3_account.access_key,
-                        aws_secret_access_key=s3_account.secret_key,
-                        host=s3_account.host)
-    bucket = conn.get_bucket(s3_account.bucket)
-    s3_keys = []
+
+    keys = {}
     for attach in attachmnts:
         remote_key = '{0}_{1}'.format(attach['utc_date'].isoformat(),
                                       attach['remote_fname'])
         s3_key = os.path.join(s3_directory, remote_key)
-        if compress:
-            s3_key += '.gz'
-            attach['local_fname'] = gzip_file(attach['local_fname'],
-                                              delete_original=True)
-        if gpg_recipient is not None:
-            s3_key += '.gpg'
-            attach['local_fname'] = gpg_encrypt(attach['local_fname'],
-                                                gpg_recipient,
-                                                delete_original=True)
-        k = Key(bucket, name=s3_key)
-        k.set_contents_from_filename(attach['local_fname'])
-        os.remove(attach['local_fname'])
-        s3_keys.append(s3_key)
+        keys[attach['local_fname']] = s3_key
+
+    s3_keys = []
+    for localpath, s3_key in keys.iteritems():
+        s3_location = _put_on_s3(localpath, s3_key, s3_account, compress,
+                                 gpg_recipient)
+        os.remove(localpath)
+        s3_keys.append(s3_location)
     if imap_archive_mbox:
         imap_account.open_connection()
         imap_account.move(imap_details['mailbox'],

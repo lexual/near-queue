@@ -2,18 +2,15 @@ import gzip
 import os
 
 
-def gzip_file(fname, delete_original=False):
+def gzip_file(fname):
     gzip_fname = fname + '.gz'
     with gzip.open(gzip_fname, 'wb') as out:
         with open(fname) as f_in:
             out.writelines(f_in)
-    if delete_original:
-        os.remove(fname)
-
     return gzip_fname
 
 
-def gpg_encrypt(fname, recipient, delete_original=False):
+def gpg_encrypt(fname, recipient):
     gpg_fname = fname + '.gpg'
     cmd_words = [
         'gpg',
@@ -23,9 +20,6 @@ def gpg_encrypt(fname, recipient, delete_original=False):
     ]
     cmd = ' '.join(cmd_words)
     os.system(cmd)
-    if delete_original:
-        os.remove(fname)
-
     return gpg_fname
 
 
