@@ -13,7 +13,7 @@ def gzip_file(fname):
 def gpg_encrypt(fname, recipient):
     gpg_fname = fname + '.gpg'
     cmd_words = [
-        'gpg',
+        '/usr/bin/gpg',
         '--encrypt',
         '--recipient', "'{0}'".format(recipient),
         fname,
@@ -26,7 +26,7 @@ def gpg_encrypt(fname, recipient):
 def gpg_decrypt(fname, delete_original=False):
     gpg_fname = fname[:-4]  # removing trailing ".gpg"
     cmd_words = [
-        'gpg',
+        '/usr/bin/gpg',
         '--output', "'{0}'".format(gpg_fname),
         '--decrypt',
         "'{0}'".format(fname),
